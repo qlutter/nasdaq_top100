@@ -101,12 +101,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Multi-zone support/resistance scanner")
     parser.add_argument(
         "--universe",
-        choices=["nasdaq_all", "sp500_top300", "custom_file"],
+        choices=["nasdaq_all", "nasdaq_top100", "sp500_top300", "custom_file"],
         default="nasdaq_all",
         help="Ticker universe selector.",
     )
     parser.add_argument("--tickers-file", default="", help="Used only when --universe custom_file")
-    parser.add_argument("--top-n", type=int, default=300, help="Top-N market-cap cutoff for sp500_top300 mode")
+    parser.add_argument("--top-n", type=int, default=100, help="Top-N market-cap cutoff for market-cap-ranked universe modes")
     parser.add_argument("--period", default="2y", help="History period for yfinance")
     parser.add_argument("--interval", default="1d", help="History interval for yfinance")
     parser.add_argument("--output-dir", default="results", help="Output directory")
@@ -120,6 +120,7 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of per-ticker full scan CSVs to write. 0 disables per-ticker files.",
     )
     parser.add_argument("--sp500-cap-workers", type=int, default=10, help="Thread count for S&P 500 market-cap ranking")
+    parser.add_argument("--nasdaq-cap-workers", type=int, default=12, help="Thread count for Nasdaq market-cap ranking")
 
     # Logic parameters
     parser.add_argument("--pivot-len", type=int, default=5)
@@ -422,6 +423,29 @@ def fetch_market_cap_one(ticker: str) -> tuple[str, float]:
     return ticker, cap
 
 
+def rank_nasdaq_by_market_cap(top_n: int, workers: int) -> pd.DataFrame:
+    constituents = fetch_nasdaq_universe()
+    records: list[dict] = []
+    with cf.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(fetch_market_cap_one, ticker): ticker for ticker in constituents}
+        for idx, future in enumerate(cf.as_completed(futures), start=1):
+            ticker = futures[future]
+            try:
+                symbol, market_cap = future.result()
+            except Exception:
+                symbol, market_cap = ticker, np.nan
+            records.append({"ticker": symbol, "market_cap": market_cap})
+            if idx % 100 == 0 or idx == len(constituents):
+                print(f"[INFO] Nasdaq market-cap fetch progress: {idx}/{len(constituents)}", flush=True)
+
+    ranked = pd.DataFrame(records)
+    ranked = ranked.dropna(subset=["market_cap"]).sort_values("market_cap", ascending=False).reset_index(drop=True)
+    ranked["rank_by_market_cap"] = np.arange(1, len(ranked) + 1)
+    ranked = ranked.head(top_n).copy()
+    ranked["universe"] = f"nasdaq_top{top_n}"
+    return ranked
+
+
 def rank_sp500_by_market_cap(top_n: int, workers: int) -> pd.DataFrame:
     constituents = fetch_sp500_constituents()
     records: list[dict] = []
@@ -454,6 +478,10 @@ def resolve_universe(args: argparse.Namespace) -> tuple[list[str], pd.DataFrame]
         tickers = fetch_nasdaq_universe()
         meta = pd.DataFrame({"ticker": tickers})
         return tickers, meta
+
+    if args.universe == "nasdaq_top100":
+        ranked = rank_nasdaq_by_market_cap(top_n=args.top_n, workers=args.nasdaq_cap_workers)
+        return ranked["ticker"].tolist(), ranked
 
     if args.universe == "sp500_top300":
         ranked = rank_sp500_by_market_cap(top_n=args.top_n, workers=args.sp500_cap_workers)
