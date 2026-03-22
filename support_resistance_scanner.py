@@ -1140,6 +1140,16 @@ def build_structure_window_hits(zones_df: pd.DataFrame, start_date: str, end_dat
         return pd.DataFrame(columns=columns)
 
     work = zones_df.copy()
+
+    # Compatibility guard: zone catalogs store the pivot anchor as `pivot_price`,
+    # while some downstream exports refer to the same field as `zone_price`.
+    # Normalize to `zone_price` so structure exports don't fail when the source
+    # dataframe was built with the older column name.
+    if "zone_price" not in work.columns and "pivot_price" in work.columns:
+        work["zone_price"] = work["pivot_price"]
+    elif "zone_price" not in work.columns:
+        work["zone_price"] = np.nan
+
     work["box_start_date"] = pd.to_datetime(work["created_date"], errors="coerce")
     work["box_end_date"] = pd.to_datetime(work["invalidated_date"].replace("", pd.NA), errors="coerce")
     work["zone_pivot_date"] = pd.to_datetime(work["pivot_date"], errors="coerce")
