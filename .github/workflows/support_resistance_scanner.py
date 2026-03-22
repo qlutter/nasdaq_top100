@@ -121,6 +121,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--sp500-cap-workers", type=int, default=10, help="Thread count for S&P 500 market-cap ranking")
     parser.add_argument("--nasdaq-cap-workers", type=int, default=12, help="Thread count for Nasdaq market-cap ranking")
+    parser.add_argument("--signal-start-date", default="", help="Optional YYYY-MM-DD filter start for exported signal hits")
+    parser.add_argument("--signal-end-date", default="", help="Optional YYYY-MM-DD filter end for exported signal hits")
 
     # Logic parameters
     parser.add_argument("--pivot-len", type=int, default=5)
@@ -1063,6 +1065,138 @@ def save_chart(df: pd.DataFrame, zones_df: pd.DataFrame, ticker: str, output_pat
     plt.close(fig)
 
 
+def parse_window_bounds(start_date: str, end_date: str) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    start_ts = pd.Timestamp(start_date) if start_date else None
+    end_ts = pd.Timestamp(end_date) if end_date else None
+    return start_ts, end_ts
+
+
+def format_date_column(series: pd.Series) -> pd.Series:
+    dt = pd.to_datetime(series, errors="coerce")
+    return dt.dt.strftime("%Y-%m-%d").fillna("")
+
+
+def build_signal_window_hits(events_df: pd.DataFrame, zones_df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+    columns = [
+        "ticker",
+        "signal_date",
+        "signal_type",
+        "box_type",
+        "box_start_date",
+        "box_end_date",
+        "zone_id",
+        "zone_kind",
+        "zone_pivot_date",
+    ]
+    if events_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    work = events_df.copy()
+    work["signal_date"] = pd.to_datetime(work["date"], errors="coerce")
+    work = work.dropna(subset=["signal_date"])
+
+    start_ts, end_ts = parse_window_bounds(start_date, end_date)
+    if start_ts is not None:
+        work = work[work["signal_date"] >= start_ts]
+    if end_ts is not None:
+        work = work[work["signal_date"] <= end_ts]
+
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+
+    if not zones_df.empty:
+        zone_meta = zones_df[["ticker", "zone_id", "created_date", "invalidated_date"]].copy()
+        zone_meta = zone_meta.rename(columns={"created_date": "box_start_date", "invalidated_date": "box_end_date"})
+        work = work.merge(zone_meta, on=["ticker", "zone_id"], how="left")
+    else:
+        work["box_start_date"] = ""
+        work["box_end_date"] = ""
+
+    work["box_type"] = np.where(work["zone_kind"] == "support", "supportBox", "resistanceBox")
+    work["signal_date"] = format_date_column(work["signal_date"])
+    work["box_start_date"] = format_date_column(work["box_start_date"])
+    work["box_end_date"] = format_date_column(work["box_end_date"])
+    work["zone_pivot_date"] = format_date_column(work["zone_pivot_date"])
+
+    work = work.sort_values(["signal_date", "ticker", "signal_type", "zone_id"], ascending=[True, True, True, True])
+    return work[columns].reset_index(drop=True)
+
+
+def build_structure_window_hits(zones_df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+    columns = [
+        "ticker",
+        "box_type",
+        "box_start_date",
+        "box_end_date",
+        "zone_id",
+        "zone_kind",
+        "zone_pivot_date",
+        "zone_price",
+        "zone_top",
+        "zone_bottom",
+        "active",
+    ]
+    if zones_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    work = zones_df.copy()
+    work["box_start_date"] = pd.to_datetime(work["created_date"], errors="coerce")
+    work["box_end_date"] = pd.to_datetime(work["invalidated_date"].replace("", pd.NA), errors="coerce")
+    work["zone_pivot_date"] = pd.to_datetime(work["pivot_date"], errors="coerce")
+
+    start_ts, end_ts = parse_window_bounds(start_date, end_date)
+    if start_ts is not None:
+        work = work[(work["box_end_date"].isna()) | (work["box_end_date"] >= start_ts)]
+    if end_ts is not None:
+        work = work[work["box_start_date"] <= end_ts]
+
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+
+    work["box_type"] = np.where(work["zone_kind"] == "support", "supportBox", "resistanceBox")
+    work["box_start_date"] = format_date_column(work["box_start_date"])
+    work["box_end_date"] = format_date_column(work["box_end_date"])
+    work["zone_pivot_date"] = format_date_column(work["zone_pivot_date"])
+    work = work.sort_values(["box_start_date", "ticker", "box_type", "zone_id"], ascending=[True, True, True, True])
+    return work[columns].reset_index(drop=True)
+
+
+def build_window_scan_results(signal_window_hits: pd.DataFrame, structure_window_hits: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "ticker",
+        "row_type",
+        "item_type",
+        "signal_date",
+        "box_start_date",
+        "box_end_date",
+        "zone_id",
+        "zone_kind",
+        "zone_pivot_date",
+    ]
+
+    frames: list[pd.DataFrame] = []
+
+    if not signal_window_hits.empty:
+        sig = signal_window_hits.copy()
+        sig["row_type"] = "signal"
+        sig["item_type"] = sig["signal_type"]
+        frames.append(sig[["ticker", "row_type", "item_type", "signal_date", "box_start_date", "box_end_date", "zone_id", "zone_kind", "zone_pivot_date"]])
+
+    if not structure_window_hits.empty:
+        box = structure_window_hits.copy()
+        box["row_type"] = "structure"
+        box["item_type"] = box["box_type"]
+        box["signal_date"] = ""
+        frames.append(box[["ticker", "row_type", "item_type", "signal_date", "box_start_date", "box_end_date", "zone_id", "zone_kind", "zone_pivot_date"]])
+
+    if not frames:
+        return pd.DataFrame(columns=columns)
+
+    out = pd.concat(frames, ignore_index=True)
+    out = out.sort_values(["ticker", "row_type", "signal_date", "box_start_date", "item_type", "zone_id"], ascending=[True, True, True, True, True, True]).reset_index(drop=True)
+    return out[columns]
+
+
 def write_markdown_summary(summary_df: pd.DataFrame, universe_meta: pd.DataFrame, output_path: Path, run_meta: dict) -> None:
     lines = [
         f"# Weekly Support / Resistance Scan — {run_meta['universe']}",
@@ -1072,6 +1206,9 @@ def write_markdown_summary(summary_df: pd.DataFrame, universe_meta: pd.DataFrame
         f"- Requested tickers: **{run_meta['requested_tickers']}**",
         f"- Scanned successfully: **{len(summary_df)}**",
         f"- Run date (UTC): **{pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M:%S')}**",
+        f"- Signal export window: **{run_meta.get('signal_start_date') or '-'} ~ {run_meta.get('signal_end_date') or '-'}**",
+        f"- Signal export rows: **{run_meta.get('signal_window_count', 0)}**",
+        f"- Structure export rows: **{run_meta.get('structure_window_count', 0)}**",
         "",
         "## Latest-bar signals",
         "",
@@ -1086,6 +1223,36 @@ def write_markdown_summary(summary_df: pd.DataFrame, universe_meta: pd.DataFrame
                 f"- **{row['ticker']}** | signals: `{row['latest_bar_signals']}` | close: `{row['close']}` | "
                 f"supports: `{row['active_support_count']}` | resistances: `{row['active_resistance_count']}`"
             )
+
+    lines.extend(["", "## Filtered signal window hits", ""])
+    signal_window_hits_path = output_path.parent / "signal_window_hits.csv"
+    if signal_window_hits_path.exists():
+        signal_window_hits = pd.read_csv(signal_window_hits_path)
+        if signal_window_hits.empty:
+            lines.append("No S1/S2/R1/R2 hits in the requested signal window.")
+        else:
+            for _, row in signal_window_hits.iterrows():
+                lines.append(
+                    f"- **{row['ticker']}** | `{row['signal_type']}` | signal: `{row['signal_date']}` | "
+                    f"box: `{row['box_type']}` | box start: `{row['box_start_date']}` | box end: `{row['box_end_date'] or '-'}`"
+                )
+    else:
+        lines.append("signal_window_hits.csv not found.")
+
+    lines.extend(["", "## Filtered structure window hits", ""])
+    structure_window_hits_path = output_path.parent / "structure_window_hits.csv"
+    if structure_window_hits_path.exists():
+        structure_window_hits = pd.read_csv(structure_window_hits_path)
+        if structure_window_hits.empty:
+            lines.append("No supportBox / resistanceBox records overlap the requested window.")
+        else:
+            for _, row in structure_window_hits.iterrows():
+                lines.append(
+                    f"- **{row['ticker']}** | `{row['box_type']}` | box start: `{row['box_start_date']}` | "
+                    f"box end: `{row['box_end_date'] or '-'}`"
+                )
+    else:
+        lines.append("structure_window_hits.csv not found.")
 
     lines.extend(["", "## Last signal by ticker", ""])
     if summary_df.empty:
@@ -1231,6 +1398,14 @@ def main() -> None:
     else:
         pd.DataFrame().to_csv(output_dir / "latest_bar_signal_hits.csv", index=False)
 
+    signal_window_hits = build_signal_window_hits(events_df, zones_df, args.signal_start_date, args.signal_end_date)
+    structure_window_hits = build_structure_window_hits(zones_df, args.signal_start_date, args.signal_end_date)
+    window_scan_results = build_window_scan_results(signal_window_hits, structure_window_hits)
+
+    signal_window_hits.to_csv(output_dir / "signal_window_hits.csv", index=False)
+    structure_window_hits.to_csv(output_dir / "structure_window_hits.csv", index=False)
+    window_scan_results.to_csv(output_dir / "window_scan_results.csv", index=False)
+
     write_markdown_summary(
         summary_df,
         universe_meta,
@@ -1240,6 +1415,10 @@ def main() -> None:
             "period": args.period,
             "interval": args.interval,
             "requested_tickers": requested_tickers,
+            "signal_start_date": args.signal_start_date,
+            "signal_end_date": args.signal_end_date,
+            "signal_window_count": len(signal_window_hits),
+            "structure_window_count": len(structure_window_hits),
         },
     )
 
