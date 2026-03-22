@@ -1,0 +1,47 @@
+name: Weekly Nasdaq All Scan
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "45 23 * * 5"
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Nasdaq all scanner
+        run: |
+          python support_resistance_scanner.py \
+            --universe nasdaq_all \
+            --period 2y \
+            --interval 1d \
+            --output-dir results/nasdaq_all \
+            --chunk-size 60 \
+            --pause-seconds 0.35 \
+            --charts-limit 80 \
+            --full-scan-limit 0
+
+      - name: Upload Nasdaq results
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-nasdaq-all-results
+          path: results/nasdaq_all/
+          retention-days: 21
