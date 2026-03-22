@@ -2,6 +2,15 @@ name: Weekly Nasdaq Top 100 Scan
 
 on:
   workflow_dispatch:
+    inputs:
+      signal_start_date:
+        description: "Optional YYYY-MM-DD start date for exported signal/structure window"
+        required: false
+        default: "2026-03-01"
+      signal_end_date:
+        description: "Optional YYYY-MM-DD end date for exported signal/structure window"
+        required: false
+        default: "2026-03-20"
   schedule:
     - cron: "45 23 * * 5"
 
@@ -27,6 +36,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Resolve signal window
+        id: dates
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.signal_start_date }}" ] && [ -n "${{ inputs.signal_end_date }}" ]; then
+            echo "signal_start_date=${{ inputs.signal_start_date }}" >> "$GITHUB_OUTPUT"
+            echo "signal_end_date=${{ inputs.signal_end_date }}" >> "$GITHUB_OUTPUT"
+          else
+            end_date=$(date -u +%F)
+            start_date=$(date -u -d "$end_date - 19 days" +%F)
+            echo "signal_start_date=$start_date" >> "$GITHUB_OUTPUT"
+            echo "signal_end_date=$end_date" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run Nasdaq Top 100 scanner
         run: |
           python support_resistance_scanner.py \
@@ -35,11 +58,13 @@ jobs:
             --period 2y \
             --interval 1d \
             --output-dir results/nasdaq_top100 \
-            --chunk-size 60 \
+            --chunk-size 40 \
             --pause-seconds 0.35 \
-            --charts-limit 80 \
+            --charts-limit 40 \
             --full-scan-limit 0 \
-            --nasdaq-cap-workers 12
+            --nasdaq-cap-workers 12 \
+            --signal-start-date "${{ steps.dates.outputs.signal_start_date }}" \
+            --signal-end-date "${{ steps.dates.outputs.signal_end_date }}"
 
       - name: Upload Nasdaq Top 100 results
         uses: actions/upload-artifact@v4
