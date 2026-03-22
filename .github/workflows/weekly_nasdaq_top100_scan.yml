@@ -1,4 +1,4 @@
-name: Weekly Nasdaq All Scan
+name: Weekly Nasdaq Top 100 Scan
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 240
 
     steps:
       - name: Checkout repository
@@ -27,21 +27,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Nasdaq all scanner
+      - name: Run Nasdaq Top 100 scanner
         run: |
           python support_resistance_scanner.py \
-            --universe nasdaq_all \
+            --universe nasdaq_top100 \
+            --top-n 100 \
             --period 2y \
             --interval 1d \
-            --output-dir results/nasdaq_all \
+            --output-dir results/nasdaq_top100 \
             --chunk-size 60 \
             --pause-seconds 0.35 \
             --charts-limit 80 \
-            --full-scan-limit 0
+            --full-scan-limit 0 \
+            --nasdaq-cap-workers 12
 
-      - name: Upload Nasdaq results
+      - name: Upload Nasdaq Top 100 results
         uses: actions/upload-artifact@v4
         with:
-          name: weekly-nasdaq-all-results
-          path: results/nasdaq_all/
+          name: weekly-nasdaq-top100-results
+          path: results/nasdaq_top100/
           retention-days: 21
